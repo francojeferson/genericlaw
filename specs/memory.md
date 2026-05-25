@@ -2,6 +2,10 @@
 
 ---
 
+> **⚠️ TRADEOFF: Estratégia de migração destrutiva para MVP.** Se o schema do banco de dados divergir do esperado na inicialização, o arquivo `db.sqlite` é renomeado para `db.sqlite.bak` e um novo banco vazio é criado. Isso significa que TODOS os dados de conversas anteriores são perdidos na migração. Esta decisão é intencional para o MVP — migrações incrementais (ALTER TABLE) serão implementadas na versão 2. Para detalhes, ver seção 9 (Manutenção de Banco de Dados).
+
+---
+
 ## 1. Resumo
 
 O módulo de persistência de estado do GeneriClaw gerencia tanto as conversas de longo prazo em banco de dados SQLite (`better-sqlite3`) quanto atua como manager da janela de contexto para impedir que o limite maximo do envelope de tokens da IA (Context Window) estoure.
@@ -45,10 +49,33 @@ A adoção do SQLite é veloz, serverless (um arquivo físico único), suporta c
 
 ## 5. Usuários e Personas
 
-**Módulos primários:** 
-- O arquivo `DocumentHandler` (grava input principal).
-- A Classe `TelegramBot` via `AgentLoop` (lê e grava answers).
-- A Ferramenta Genérica de Sistema (apenas lê seu próprio histórico pra sumarização futura).
+**Modulos primarios:** 
+- O `AgentController` (grava input do usuario e resposta do agente, consulta historico para contexto).
+- A Ferramenta Generica de Sistema (apenas le seu proprio historico pra sumarizacao futura).
+
+### Interfaces do Repository
+
+**ConversationRepository:**
+```typescript
+interface ConversationRepository {
+  create(userId: string, provider?: string): Conversation;
+  findById(id: string): Conversation | null;
+  findByUserId(userId: string): Conversation[];
+  markBlocked(conversationId: string): void;
+  isBlocked(conversationId: string): boolean;
+  updateTitle(conversationId: string, title: string): void;
+}
+```
+
+**MessageRepository:**
+```typescript
+interface MessageRepository {
+  create(conversationId: string, role: string, content: string, toolName?: string, toolCallId?: string, metadata?: string): Message;
+  findByConversationId(conversationId: string, limit?: number): Message[];
+  countByConversationId(conversationId: string): number;
+  deleteOldMessages(conversationId: string, keepCount: number): number;
+}
+```
 
 ---
 
@@ -82,6 +109,9 @@ Falhas de Banco - Vide [11. Edge Cases e Tratamento de Erros](#11-edge-cases-e-t
 | ID | Requisito | Valor alvo | Observação |
 |----|-----------|-----------|------------|
 | RNF-01 | Transações Seguras | Auto-commit nativo | WAL ativo resolve concorrencia Single thread node. |
+| RNF-02 | Tempo de inserção | < 10ms | `better-sqlite3` sync. |
+| RNF-03 | Tempo de consulta de histórico | < 5ms | LIMIT query simples. |
+| RNF-04 | Tamanho máximo por mensagem | 65536 bytes | Truncamento aplicado antes da inserção. |
 
 ---
 
@@ -93,10 +123,47 @@ Pura estrutura sem interface visual (ver `sqlite-viewer` VSCode extensão para d
 
 ## 9. Modelo de Dados
 
-`conversations`
-`messages`
+Schema SQLite completo. Criado automaticamente na inicialização pelo Singleton de DB se as tabelas não existirem.
 
-Sem foreign keys restritas ativadas com pragma foreign_keys=ON pra priorizar inserts mais leves sem checks, apenas referências programáticas via Node.
+```sql
+CREATE TABLE IF NOT EXISTS conversations (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL,
+  title         TEXT DEFAULT '',
+  provider      TEXT NOT NULL DEFAULT 'gemini',
+  blocked       INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL,
+  role            TEXT NOT NULL CHECK(role IN ('user','assistant','system','tool')),
+  content         TEXT NOT NULL,
+  tool_name       TEXT,
+  tool_call_id    TEXT,
+  metadata        TEXT DEFAULT '{}',
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(conversation_id, role);
+```
+
+Pragma de inicialização: `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA auto_vacuum=INCREMENTAL;`
+
+### Manutenção de Banco de Dados
+
+**Política de retenção:** Mensagens de conversas com mais de `MEMORY_WINDOW_SIZE * 4` registros são truncadas automaticamente no momento da inserção. O `MemoryManager.truncateOldMessages(conversationId)` mantém apenas as `MEMORY_WINDOW_SIZE` mensagens mais recentes daquela conversa, removendo as antigas via `DELETE ... WHERE id NOT IN (SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?)`.
+
+**Vacuum:** Executado via `PRAGMA auto_vacuum=INCREMENTAL` e `PRAGMA incremental_vacuum` a cada 500 inserções (contador interno no MemoryManager). O objetivo é manter o arquivo `.db` sob 500MB. Se o arquivo exceder 500MB, um `VACUUM` completo é executado na próxima inicialização.
+
+**Estratégia de migração de schema:** Para MVP, a estratégia é "recriar se inválido". O sistema verifica se as tabelas existem com o schema esperado usando `PRAGMA table_info`. Se houver divergência, o banco é renomeado para `db.sqlite.bak` e recriado do zero. Migrações incrementais (ALTER TABLE) serão adicionadas na versão 2.
 
 ---
 
@@ -115,13 +182,13 @@ Sem foreign keys restritas ativadas com pragma foreign_keys=ON pra priorizar ins
 |---------|---------|----------------------|
 | EC-01: Arquivo Lock file corrupto | Desligamento forçado de energia no Write SQLite local. | SQLite reabre do journaling automático e read de forma íntegra sem interrupções maiores. |
 | EC-02: Null Bytes na Mensagem do Usuário | Receber bytes invisíveis no TG causando Erro de syntax DB. | Stripping na entrada `content.replace(/\u0000/g, '')`. O DB não engole a query suja. |
-| EC-03: Memória Enorme de Resposta de LLM | O modelo decide cuspir 16k tokens em Output. | Limite o SQLite max text de String e truncate se estourar Max Byte (fallback). |
+| EC-03: Memoria Enorme de Resposta de LLM | O modelo decide cuspir 16k tokens em Output. | Limite aplicado: 64KB por mensagem (65536 bytes). MemoryManager trunca `content` para 65536 bytes (medidos em UTF-8 bytes, nao em caracteres) antes de inserir no banco. Caracteres multi-byte (emoji, CJK) consomem multiplos bytes — uma mensagem com muitos emojis pode atingir o limite com menos de 65536 caracteres. Mensagens truncadas logam warning: `[MemoryManager] Message content truncated from X to 65536 bytes.` |
 
 ---
 
 ## 12. Segurança e Privacidade
 
-- **Arquivos DB Sensíveis:** O `genericlaw.db` jamais pode ir pro Git (Adicionar no `.gitignore` /data).
+- **Arquivos DB Sensíveis:** O `db.sqlite` jamais pode ir pro Git (Adicionar no `.gitignore` /data).
 - **Sem senhas cruas no prompt:** O DB grava as msgs do usuário. Não logaremos APIs ali como System Prompts secretos pra evitar persistencia indevida.
 
 ---
@@ -134,4 +201,6 @@ Rollout instantâneo para DB Version 1. Scripts de Migration explícitos não s�
 
 ## 14. Open Questions
 
-N/A
+- Q1 (Resolvida): Arquivos `.bak` acumulam no disco. Comportamento: na inicialização, se já existir um `db.sqlite.bak` de uma migração anterior, ele é sobrescrito (apenas o backup mais recente é mantido). Um warning é logado: `[MemoryManager] Database schema changed. Old database backed up to data/db.sqlite.bak. Remove manually if no longer needed.`
+- Q2 (Resolvida): O fator `MEMORY_WINDOW_SIZE * 4` é uma heurística de buffer: mantém 4x a janela de contexto no banco para permitir scrollback ocasional sem estourar o contexto do LLM. O truncamento ocorre apenas no carregamento para o LLM (`MEMORY_WINDOW_SIZE` mensagens), mas o banco retém 4x para consultas futuras ou debugging. O fator 4x é empírico e pode ser ajustado com dados reais de uso.
+- Q3 (Resolvida): EC-03 corrigido. O limite aplicado é 64KB por mensagem (consistente com RNF-02 do llm-provider.md). O MemoryManager trunca `content` para 65536 bytes (UTF-8) antes de inserir no banco. Mensagens truncadas logam warning: `[MemoryManager] Message content truncated from X to 65536 bytes.`

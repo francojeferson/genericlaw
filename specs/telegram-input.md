@@ -43,8 +43,9 @@ A lib Grammy suporta streaming de arquivos anexos por `getFile()`. O Nodejs lida
 
 - NG-01: Mídias Visuais cruas / ImageVision. Este escopo é de Texto, Documentos e Áudios. Não aceitaremos JPGs, PNGs ou OCR de imagens estáticas no Input primário nesta especificação (foco em NLP e processamento textual).
 - NG-02: Receber envios via Webhook em Servidor Externo. Rodaremos num loop simples interno Long Polling na máquina local.
-- NG-03: Processamento em tempo real do stream de áudio. O sistema precisará que o arquivo inteiro seja baixado para iniciar o Whisper.
-- NG-04: Gerar o áudio final (TTS) no próprio Input Handler. O módulo de Input é responsável apenas por **ouvir e sinalizar** que uma resposta em áudio foi solicitada explícita ou implicitamente (se o input for áudio). Quem envia o arquivo `.ogg` falado é o Output Handler, a partir da flag setada por este módulo ou pelo Agent Loop.
+- NG-03: Interpretação semântica de intenção de áudio. O sistema usa heurística simples (input de voz = audio reply, keyword "responda em audio" = audio reply). Textos ambíguos como "sem ser em audio" não são interpretados. Esta é uma limitação permanente documentada em EC-07.
+- NG-04: Processamento em tempo real do stream de áudio. O sistema precisará que o arquivo inteiro seja baixado para iniciar o Whisper.
+- NG-05: Gerar o áudio final (TTS) no próprio Input Handler. O módulo de Input é responsável apenas por **ouvir e sinalizar** que uma resposta em áudio foi solicitada explícita ou implicitamente (se o input for áudio). Quem envia o arquivo `.ogg` falado é o Output Handler, a partir da flag setada por este módulo ou pelo Agent Loop.
 
 ---
 
@@ -64,8 +65,9 @@ A lib Grammy suporta streaming de arquivos anexos por `getFile()`. O Nodejs lida
 | RF-02 | O sistema deve acionar a extração local quando receber Documentos com mimetype `application/pdf` ou arquivos contendo a extensão `.md`. | Must | O sistema retorna o conteúdo do arquivo transformado em bloco de texto concatenado à Legenda. |
 | RF-03 | O sistema deve excluir os documentos baixados da `tmpDir` (`./tmp`) após o parse ou em caso de erro. | Must | Exclusão do rastro na clausula finally da try-catch. Sem memory leaks no FileSystem. |
 | RF-04 | O sistema deve ouvir eventos de voz (`message:voice`) e áudio (`message:audio`). | Must | O sistema reconhece anexo de aúdio e o envia para parser do Whisper. |
-| RF-05 | O sistema deve usar o Whisper Local para transcrever o áudio baixado para texto. | Must | Áudio convertido para STT. O log do bot mostra "Transcript: xyz" e o sistema envia para o Agent Loop. |
-| RF-06 | O sistema deve sinalizar a preferência por áudio (TTS) caso o input seja originário de voz ou o texto possua keyword explícita ("responda em áudio / fale comigo"). | Must | O payload injetado na Memory conterá um marcador booleano `requires_audio_reply: true` e a *voice_id* fixada em `pt-BR-ThalitaMultilingualNeural`. |
+| RF-05 | O sistema deve usar o Whisper Local para transcrever o audio baixado para texto. Whisper e invocado via child process (`child_process.execFile`) com o binario CLI, nao como biblioteca no processo Node. Isso isola crashes e evita inflar a memoria do processo principal com modelos multi-GB. | Must | Audio convertido para STT. O log do bot mostra "Transcript: xyz" e o sistema envia para o Agent Loop. |
+| RF-06 | O sistema deve sinalizar a preferencia por audio (TTS) caso o input seja originario de voz ou o texto possua keyword explicita ("responda em audio" / "fale comigo"). A deteccao de keywords e case-insensitive (ex: "Responda em Audio" tambem ativa TTS) e busca a keyword como substring em qualquer posicao do texto. A lista de keywords e exaustiva e documentada — variacoes, sinonimos ou typos nao sao reconhecidos (ver EC-07). | Must | O payload injetado na Memory contera um marcador booleano `requires_audio_reply: true` e a *voice_id* fixada em `pt-BR-ThalitaMultilingualNeural`. |
+| RF-07 | O sistema deve converter audio do formato OGG/OPUS do Telegram para WAV mono 16kHz usando ffmpeg antes de passar ao Whisper. ffmpeg e dependencia OBRIGATORIA de sistema. Se ausente na inicializacao, entrada de voz e desabilitada e o usuario recebe: "Voz desabilitada: ffmpeg nao encontrado no sistema." | Must | Arquivo OGG do Telegram e convertido para WAV e o Whisper transcreve corretamente. |
 
 ### 6.2 Fluxo Principal (Happy Path)
 
@@ -89,13 +91,76 @@ Falhas - ver seção 11.
 | ID | Requisito | Valor alvo | Observação |
 |----|-----------|-----------|------------|
 | RNF-01 | Async IO | 100% Non-Blocking | O arquivo baixando nao interrompe msgs concorrentes de texto enviadas. |
-| RNF-02 | STT Performance | < 2x a duração | O tempo para Whisper processar STT não deve exceder significativamente a extração local dependendo da GPU ou CPU usada. |
+| RNF-02 | STT Performance | < 2x a duração | O tempo para Whisper processar STT não deve exceder significativamente a extração local dependendo da GPU ou CPU usada. Margem máxima absoluta: 5 minutos. Se o processamento exceder esse teto, timeout e fallback para resposta de erro. |
 
 ---
 
 ## 8. Design e Interface
 
-Pura estrutura Middleware no App Controller sem vizualização fora o Client TG nativo do smartphone do usuário. Apenas haverá feedback de actions como envio de texto simulando se o bot realmente ouviu em paralelo a extração STT.
+### 8.1 WhisperProcessor (STT)
+
+Responsavel pela transcricao de audio para texto via Whisper local.
+
+```typescript
+class WhisperProcessor {
+  // modelPath é derivado de WHISPER_MODEL: `./models/whisper/ggml-{WHISPER_MODEL}.bin`
+  // binaryPath é o valor de WHISPER_BINARY (padrão: "whisper")
+  constructor(config: { modelPath: string; binaryPath: string; tempDir: string });
+
+  async transcribe(audioFilePath: string): Promise<string>;
+  async isAvailable(): Promise<boolean>;
+}
+```
+
+**Error handling:** Se o binario `whisper` nao for encontrado ou o modelo nao existir, `isAvailable()` retorna `false`. O InputHandler desabilita entrada de voz e notifica o usuario. Se `transcribe()` falhar, a excecao encapsulada informa se foi timeout (60s), OOM ou modelo corrompido.
+
+**Temp file management:** O WhisperProcessor NAO gerencia arquivos temporarios — o InputHandler passa o path do arquivo ja convertido (WAV) e e responsavel por deleta-lo no `finally`.
+
+### 8.2 TelegramInputHandler (Facade)
+
+Classe principal que conecta os listeners do Grammy e produz `ProcessedInput` para o `AgentController`. Referenciada por architecture.md, bootstrap.md e agent-controller.md.
+
+```typescript
+class TelegramInputHandler {
+  private bot: GrammyBot;
+  private whisper: WhisperProcessor;
+  private allowedUserIds: string[];
+  private tmpDir: string;
+  private controller: AgentController;
+
+  constructor(deps: TelegramInputHandlerDeps);
+
+  // Registra os listeners do Grammy e inicia o polling
+  async start(): Promise<void>;
+
+  // Handlers de mensagem
+  private async handleText(ctx: GrammyContext): Promise<void>;
+  private async handleVoice(ctx: GrammyContext): Promise<void>;
+  private async handleAudio(ctx: GrammyContext): Promise<void>;
+  private async handleDocument(ctx: GrammyContext): Promise<void>;
+
+  // Processamento de anexos
+  private async downloadFile(fileId: string): Promise<string>;   // retorna path do arquivo baixado
+  private async extractPdfText(filePath: string): Promise<string>;
+  private async extractMarkdownText(filePath: string): Promise<string>;
+
+  // Constroi ProcessedInput a partir do contexto e conteudo extraido
+  private buildProcessedInput(
+    ctx: GrammyContext,
+    content: string,
+    source: "text" | "voice" | "document",
+    requiresAudioReply: boolean
+  ): ProcessedInput;
+}
+```
+
+**Contrato de `start()`:** Registra listeners para `message:text`, `message:voice`, `message:audio` e `message:document`. Cada listener valida `ctx.from.id` contra `allowedUserIds`, extrai conteudo, monta `ProcessedInput` e chama `controller.handle(processedInput)`.
+
+**Contrato de `buildProcessedInput()`:** Gera `conversationId` a partir de `String(ctx.chat.id)` (conversao explicita de number para string — Telegram chat IDs sao numeros), extrai `userId` de `String(ctx.from.id)`, e preenche `requiresAudioReply` com `true` se o input for voz ou contiver keyword "responda em audio" / "fale comigo". A conversao `String()` e obrigatoria e deve ser aplicada em todos os handlers que produzem `ProcessedInput`. Ver RF-06 para regras de deteccao de audio reply.
+
+**Contrato de download/extração:** `downloadFile` obtem URL de download via `bot.api.getFile()` e faz stream para `tmpDir`. `extractPdfText` usa `pdf-parse`. `extractMarkdownText` le o arquivo como UTF-8. Ambos retornam string vazia em caso de falha. Arquivos temporarios sao deletados no `finally` de cada handler.
+
+Pura estrutura Middleware no App Controller sem vizualizacao fora o Client TG nativo do smartphone do usuario. Apenas havera feedback de actions como envio de texto simulando se o bot realmente ouviu em paralelo a extracao STT.
 
 ---
 
@@ -128,7 +193,11 @@ A pasta `/tmp/` retém temporariamente `.pdf`, `.md`, `.mp3`, `.ogg`, etc.
 | EC-04: PDF massivo | Upload finalizado e parsing travando estourando local. | Envelopamento de limite de Bytes (ex. 20MB max para text extract). O Catch block captura falha de Memory e o sistema limpa o TEMP no `finally`. O usuário recebe alerta de PDF muito grande. |
 | EC-05: Timeout da API do Telegram (Download de Mídia) | A rede falha durante o streaming do arquivo de áudio ou PDF pelo Telegram. | O downloader dá throw de Timeout após 15 segundos sem bytes recebidos. O bot envia mensagem ao usuário: "⚠️ Falha ao baixar arquivo do Telegram. Tente novamente." e a promise falha limpando qualquer resquício de chunk. |
 | EC-06: API de LLM Externa indisponível para Agent Loop | STT extrai o texto perfeitamente, a LLM do Core cai em seguida | O STT conclui sua parte transcrevendo e injeta o texto na Memory. A falha da LLM subsequente é tratada pelo Handler Generativo. O input é mantido como texto salvo. |
-| EC-07: Solicitação explícita por áudio ambígua | Usuário manda "responda isso sem ser em áudio" | Se não for flag por RegEx ou NLP fino, o sistema pode não setar "requires_audio_reply". Por design atual, ele apenas injeta `true` se a intenção for estritamente confirmada via LLM guardrail e/ou via áudio nativo (Voice Note que assume default = true). |
+| EC-07: Solicitacao explicita por audio ambigua | Usuario manda "responda isso sem ser em audio" | Limitacao conhecida: o sistema usa heuristica simples (input de voz = requer audio reply, keyword "responda em audio" = requer audio reply). Textos ambiguos como "sem ser em audio" nao sao interpretados. Mitigacao: o usuario sempre pode desligar o TTS manualmente no Output ou o OutputHandler oferece fallback para texto. Documentado como limitacao permanente — mover para Non-Goals na versao 2. |
+| EC-08: PDF criptografado ou protegido por senha | Usuario envia PDF com protecao de senha ou criptografia DRM. | `pdf-parse` falha na extracao. O sistema captura o erro, responde: "⚠️ Nao foi possivel extrair texto deste PDF. Ele pode estar protegido por senha ou criptografado." e limpa o arquivo temporario. |
+| EC-09: PDF escaneado ou baseado em imagem | Usuario envia PDF gerado por scanner (paginas sao imagens, nao texto selecionavel). | `pdf-parse` retorna string vazia ou com muito pouco texto. O sistema detecta resultado vazio (< 10 caracteres apos trim) e responde: "⚠️ Este PDF parece conter apenas imagens escaneadas. Nao foi possivel extrair texto." OCR nao e suportado no MVP. |
+| EC-10: PDF com encoding corrompido ou misto | PDF contem fontes com encoding invalido, mistura de UTF-8 e Latin-1, ou caracteres nao mapeados. | `pdf-parse` pode lancar excecao ou retornar texto com caracteres de substituicao (Unicode replacement character `\uFFFD`). O sistema captura a excecao e responde com mensagem de erro generica. Caracteres `\uFFFD` sao aceitos como texto valido — a limpeza de encoding nao e responsabilidade do InputHandler. |
+| EC-11: PDF corrompido ou arquivo invalido | Usuario renomeou um `.exe` ou `.zip` para `.pdf`, ou o arquivo esta truncado. | `pdf-parse` lanca excecao de parse. O sistema captura e responde: "⚠️ Arquivo PDF invalido ou corrompido." e limpa o arquivo temporario. |
 
 ---
 
@@ -145,31 +214,9 @@ A estrutura do `AudioHandler` acoplada ao Bot Core ficarão em produção local 
 
 ---
 
-## 14. Open Questions
+## 14. Open Questions (Resolvidos)
 
-- Como acionar o Whisper local a partir do backend Node.js (se GeneriClaw ainda for Node). *Decisão pendente: usar bridge FFI, ou Child Process nativo na máquina.*
-- Precisaremos de um `ffmpeg` standalone local para converter aúdio em formato compatível com o whisper ou o próprio whisper local processa os M4A, OPUS/OGG (nativos do Telegram)? *Assume-se que whisper lida com OGG/OPUS baseados em FFMEPG instalado na máquina da Host.*
+As perguntas abaixo foram resolvidas e suas decisões foram promovidas para a seção de requisitos (RF-05 e RF-07):
 
----
-
-## 15. Relatório de Avaliação Final (SDD)
-```text
-============================================================
-  SPEC QUALITY REPORT
-  SCORE TOTAL: 94.0/100  —  ⭐ Excelente — Pronta para implementação
-
-  BREAKDOWN POR DIMENSÃO:
-  Completude           100%       30%     30.0/pt
-  Testabilidade        100%       25%     25.0/pt
-  Clareza               70%       20%     14.0/pt
-  Escopo               100%       15%     15.0/pt
-  Edge Cases           100%       10%     10.0/pt
-
-  ✅ PONTOS FORTES:
-     ✅ Seção 1 (Resumo) presente e preenchida
-     ✅ Seção 2 (Contexto) presente e preenchida
-     ✅ Seção 3 (Goals) presente e preenchida
-     ✅ Seção 4 (Non-Goals) presente e preenchida
-     ✅ Seção 5 (Usuários) presente e preenchida
-============================================================
-```
+- **Q1 (Resolvida):** Invocação do Whisper via Node.js → Decisão: `child_process.execFile`. Ver RF-05.
+- **Q2 (Resolvida):** Conversão de formato de áudio → Decisão: ffmpeg obrigatório. Ver RF-07.

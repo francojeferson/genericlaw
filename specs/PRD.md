@@ -31,8 +31,12 @@ A ascensão de LLMs super eficientes (Gemini 1.5/2.0+ e DeepSeek) somada com a f
 **Métricas de sucesso:**
 | Métrica | Baseline atual | Target | Prazo |
 |---------|---------------|--------|-------|
-| Uptime local da API de bot | 0% | 99% após testes | 30 dias |
-| Troca dinâmica de Skills via hot-reload | Sem suporte | 1 segundo recarga | 10 dias |
+| Uptime local da API de bot (G-01) | 0% | 99% após testes | 30 dias |
+| Latencia de switch de provider LLM (G-02) | N/A | < 500ms para fallback em execução | 30 dias |
+| Taxa de sucesso de fallback entre providers (G-02) | N/A | > 95% das tentativas | 30 dias |
+| Latencia de persistencia de mensagem (G-03) | N/A | < 10ms por insert (ver memory-manager.md seção 7) | 30 dias |
+| Precisao da janela de contexto (G-03) | N/A | 100% das mensagens dentro do window carregadas | 30 dias |
+| Requisicoes nao autorizadas bloqueadas por dia (G-04) | N/A | 100% bloqueadas, 0 falsos positivos | 30 dias |
 
 ---
 
@@ -64,16 +68,17 @@ O usuário envia um chat no Telegram, o GeneriClaw roda local em background num 
 |----|-----------|-----------|-------------------|
 | RF-01 | O sistema deve rodar via loop de polling persistente da biblioteca Grammy | Must | O terminal aciona o listener com `npm run dev` e intercepta as mensagens sem fechar. |
 | RF-02 | O sistema deve validar todas as mensagens entrantes contra a variável de `TELEGRAM_ALLOWED_USER_IDS` | Must | Um usuário não cadastrado recebe ignore instantâneo; nenhum log sensível é disparado e nenhuma API key é torrada. |
-| RF-03 | O sistema deve alternar "LLMs" instanciando fábricas (`ProviderFactory`) | Must | Trocar "gemini" por "deepseek" no config envia prompts diretos ao endpoint alvo corretamente parseado. |
+| RF-03 | O sistema deve alternar "LLMs" instanciando fábricas (`ProviderFactory`) com fallback automático | Must | Configurar `LLM_PROVIDER` (primário) e `LLM_PROVIDERS` (cadeia ordenada de fallback, ex: `gemini,deepseek`) no `.env`. Se o primário falhar, o próximo da cadeia é acionado automaticamente via `ProviderFactory.createWithFallback()`. Ver configuration.md e llm-provider.md para detalhes. |
 
 ### 6.2 Fluxo Principal (Happy Path)
 
 1. O usuário manda uma string "resuma para mim" no Telegram.
 2. O sistema do bot no PC intercepta (via Facade do `AgentController`).
 3. O sistema checa se ID pertence à Whitelist (SIM).
-4. O sistema joga pro Loop (ReAct / AgentLoop) com Contexto Local salvo do banco SQLite.
-5. O LLM selecionado processa, encontra ou não a Tool necessária.
-6. A resposta volta via Output Handler no chat Telegram.
+4. O AgentController chama `SkillRouter.route(content, availableSkills)` para determinar skill ativa (chamada LLM adicional — cada mensagem incorre em DUAS chamadas LLM: roteamento + AgentLoop). A latência e custo dobrados são um tradeoff documentado do MVP. Com precos atuais de API (~$0.15/1M tokens input, ~$0.60/1M tokens output para Gemini 2.0 Flash), o custo adicional de roteamento e estimado em aproximadamente $0.05 por 1000 mensagens. SkillRouter usa o mesmo provider configurado via `ProviderFactory.createWithFallback()`. Ver skill-user.md seção 15 Q4.
+5. O AgentController carrega o histórico do banco SQLite via MemoryManager, monta o array completo de mensagens (system prompt + histórico + input atual), e injeta no AgentLoop. O AgentLoop recebe o array pronto e nao consulta o banco de dados (ver agent-loop.md 6.2 step 2 e agent-controller.md 6.2.1 para o fluxo detalhado de montagem).
+6. O LLM selecionado processa, encontra ou não a Tool necessária.
+7. A resposta volta via Output Handler no chat Telegram.
 
 ### 6.3 Fluxos Alternativos
 
@@ -103,20 +108,7 @@ O usuário envia um chat no Telegram, o GeneriClaw roda local em background num 
 
 ## 9. Modelo de Dados
 
-**Entidades modificadas/persistidas em `./data/`**
-
-```sql
-conversations {
-  id: string        // UUID ou Hash único da thread do usuário
-  user_id: string   // O originador whitelisted
-  provider: string  // ex: 'gemini'
-}
-messages {
-  conversation_id: string 
-  role: string      // 'user'|'assistant'|'system'
-  content: string   // Raw Payload da conversa
-}
-```
+O schema completo do banco de dados SQLite está definido em `memory.md` seção 9 — este é o source of truth autoritativo para a estrutura das tabelas `conversations` e `messages`. A PRD referencia o schema mas não o duplica.
 
 ---
 
@@ -148,11 +140,90 @@ messages {
 
 ---
 
-## 13. Plano de Rollout
+## 13. Estratégia de Testes
+
+Todo módulo com contrato de interface (AgentController, AgentLoop, ProviderFactory, ToolRegistry, MemoryManager, SkillLoader, TelegramOutputHandler) deve ter testes unitários cobrindo o caminho feliz e os edge cases documentados.
+
+- **Testes unitários:** Vitest + mocks manuais. Cada módulo testado isoladamente com dependências mockadas.
+- **AgentLoop com LLM mockado:** `ILlmProvider` mock que retorna respostas pré-definidas (tool calls, erros, JSON malformado) para validar cada edge case do loop sem depender de API externa.
+- **MemoryManager:** SQLite em memória (`:memory:`) para testes de persistência sem arquivo real.
+- **Cobertura mínima alvo:** 80% de branches nos módulos core (AgentLoop, AgentController, ProviderFactory).
+- **Integração:** Teste ponta a ponta com Telegram mockado (grammy `Context` falso) para validar o pipeline completo input -> controller -> loop -> output.
+
+### Estrutura de arquivos de teste
+
+```
+tests/
+  unit/
+    agent-loop.test.ts
+    agent-controller.test.ts
+    provider-factory.test.ts
+    tool-registry.test.ts
+    memory-manager.test.ts
+    skill-loader.test.ts
+    skill-router.test.ts
+    config.test.ts
+  integration/
+    pipeline.test.ts        # input -> controller -> loop -> output com mocks
+  mocks/
+    llm-provider.mock.ts    # Mock de ILlmProvider
+    memory-manager.mock.ts  # Mock de MemoryManager
+    grammy-context.mock.ts  # Mock de Grammy Context
+```
+
+### Contratos de mock
+
+**Mock ILlmProvider:**
+```typescript
+class MockLlmProvider implements ILlmProvider {
+  readonly name = "mock";
+  private responses: LlmResponse[];  // fila de respostas pre-definidas
+
+  enqueueResponse(response: LlmResponse): void;
+  async generate(messages: LlmMessage[]): Promise<LlmResponse>;
+}
+```
+
+**Mock MemoryManager:**
+```typescript
+class MockMemoryManager {
+  private conversations: Map<string, Conversation>;
+  private messages: Map<string, Message[]>;
+  private blockedConversations: Set<string>;
+
+  async initialize(): Promise<void>;
+  createConversation(userId: string, provider?: string): Conversation;
+  getRecentMessages(conversationId: string): Message[];
+  saveResponse(conversationId: string, result: AgentLoopResult): void;
+  isConversationBlocked(conversationId: string): boolean;
+  markConversationBlocked(conversationId: string): void;
+}
+```
+
+**Mock Grammy Context:**
+```typescript
+class MockGrammyContext {
+  readonly chat: { id: number };
+  readonly from: { id: number; first_name: string };
+  private sentMessages: string[];
+
+  async reply(text: string): Promise<void>;
+  async replyWithDocument(path: string): Promise<void>;
+  async replyWithVoice(path: string): Promise<void>;
+}
+```
+
+---
+
+## 14. Plano de Rollout
 
 - **Estratégia:** Deploy em máquina local rodando `npm run dev` para a instância primaria.
 - **Monitoramento:** Log no Stdout no terminal para acompanhar transições de Agent Loop e falhas nas Requests.
 
 ---
 
-## 14. Open Questions
+## 15. Open Questions
+
+- Q1 (Resolvida): Atualizacao manual com revisao de changelog. Semver automatico NAO sera usado no MVP — risco de breaking changes em dependencias core (grammy, better-sqlite3) e alto demais para atualizacao desacompanhada. Dependabot/Renovate podem ser configurados para alertas apenas (nao PR automaticos) na versao 2. Alinhado com agent-controller.md Q1.
+- Q2 (Deferido para v2): "Uptime local 99%". A métrica precisa de definição operacional (processo Node? polling? pipeline completo incluindo LLM?). Para MVP, uptime é monitorado informalmente via logs de stdout. Definição formal e alertas serão implementados na versão 2.
+- Q3 (Resolvido): O conceito de Skill é definido em `skill-user.md` (seção 12 - Fronteira Skill vs Tool). PRD faz referência via métrica G-04. Cross-reference explícita adicionada: ver `specs/skill-user.md`.
