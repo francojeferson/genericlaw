@@ -1,0 +1,29 @@
+{
+  "name": "genericlaw",
+  "version": "1.0.0",
+  "description": "Agente pessoal de IA operando localmente via Telegram",
+  "main": "src/main.ts",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "setup:whisper": "node dist/scripts/setup-whisper.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "sql.js": "^1.12.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.34.0",
+    "pdf-parse": "^1.1.1",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.1.1"
+  }
+}

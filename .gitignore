@@ -1,0 +1,25 @@
+# Dados e secrets
+data/
+.env
+*.lock
+
+# Dependencias
+node_modules/
+
+# Build
+dist/
+
+# Arquivos temporarios
+tmp/
+*.tmp
+*.bak
+
+# Modelos Whisper (multi-GB)
+models/whisper/*.bin
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
