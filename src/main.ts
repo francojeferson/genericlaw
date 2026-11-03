@@ -246,6 +246,18 @@ async function main(): Promise<void> {
   }
 }
 
+// O cliente MTProto do coletor levanta erro fora de qualquer try/catch quando a sessao
+// e revogada ou a conexao cai de vez. Sem isto o Node derruba o processo inteiro e o bot
+// some do ar calado — quebrando a promessa de que falha no coletor nao afeta o resto.
+process.on("unhandledRejection", (reason: unknown) => {
+  const detalhe = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  console.error(`[Bootstrap] Unhandled rejection (processo continua):\n${detalhe}`);
+  if (detalhe.includes("SESSION_REVOKED") || detalhe.includes("AUTH_KEY")) {
+    // quase sempre e um segundo cliente usando a mesma TELEGRAM_SESSION, nao revogacao de fato
+    console.error("[Bootstrap] Sessao do Telegram rejeitada. Verifique se nao ha outro processo usando a mesma TELEGRAM_SESSION; se nao houver, rode `npm run telegram:login`.");
+  }
+});
+
 main().catch((err) => {
   console.error(`[Bootstrap] Fatal error: ${err}`);
   process.exit(1);

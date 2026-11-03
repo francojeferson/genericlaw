@@ -189,12 +189,25 @@ export class TelegramInputHandler {
     let oggPath: string | null = null;
     let wavPath: string | null = null;
 
+    // etapa corrente: sem isso a mensagem de erro nao diz se quebrou no download,
+    // no ffmpeg ou no whisper, e as tres falham com texto parecido
+    let etapa = "download";
+    const t0 = Date.now();
+
     try {
       oggPath = await this.downloadFile(fileId, "ogg");
+      console.info(
+        `[TelegramInputHandler] Voz: baixado ${fs.statSync(oggPath).size} bytes em ${Date.now() - t0}ms`
+      );
 
+      etapa = "ffmpeg";
       wavPath = path.resolve(this.tmpDir, `${path.basename(oggPath, ".ogg")}.wav`);
       await this.convertToWav(oggPath, wavPath);
+      // 32000 bytes/s em 16kHz mono s16: a duracao estima o tempo do whisper
+      const segundos = Math.round(fs.statSync(wavPath).size / 32000);
+      console.info(`[TelegramInputHandler] Voz: wav de ~${segundos}s, transcrevendo...`);
 
+      etapa = "whisper";
       const whisperAvailable = await this.whisper.isAvailable();
       if (!whisperAvailable) {
         await ctx.reply("Voz desabilitada: Whisper não está disponível no momento.");
@@ -202,18 +215,24 @@ export class TelegramInputHandler {
       }
 
       const transcript = await this.whisper.transcribe(wavPath);
+      console.info(
+        `[TelegramInputHandler] Voz: transcrito em ${Date.now() - t0}ms, ${transcript.length} chars`
+      );
 
       if (!transcript.trim()) {
         await ctx.reply("Áudio vazio captado. Pode reenviar?");
         return;
       }
 
+      etapa = "agente";
       const input = this.buildProcessedInput(ctx, transcript, "voice", true);
       await this.controller.handle(input, ctx);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[TelegramInputHandler] Voice processing error: ${msg}`);
-      await ctx.reply("\u26a0\ufe0f Falha ao processar o áudio: arquivo grande demais ou falha no serviço.");
+      const detalhe = err instanceof Error ? err.stack || err.message : String(err);
+      console.error(
+        `[TelegramInputHandler] Voice processing error na etapa '${etapa}' apos ${Date.now() - t0}ms:\n${detalhe}`
+      );
+      await ctx.reply(`⚠️ Falha ao processar o áudio na etapa '${etapa}'. Veja o log do servidor.`);
     } finally {
       if (oggPath) try { fs.unlinkSync(oggPath); } catch {}
       if (wavPath) try { fs.unlinkSync(wavPath); } catch {}
