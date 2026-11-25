@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { EventEmitter } from "events";
 import type { Context } from "grammy";
 import { AgentController } from "../src/core/agent-controller.js";
 import type { AgentControllerDeps } from "../src/core/agent-controller.js";
@@ -33,13 +32,11 @@ const gravados: { delivered?: string }[] = [];
 
 function controllerFake(): { controller: AgentController; ctx: FakeContext } {
   const memoryManager = {
-    isConversationBlocked: () => false,
     getConversation: () => ({ id: "c" }),
     createConversation: () => ({ id: "c" }),
     saveMessage: () => {},
     getRecentMessages: () => [{ role: "user", content: "oi" }],
     saveResponse: (_id: string, _r: unknown, delivered?: string) => void gravados.push({ delivered }),
-    markConversationBlocked: () => {},
     shutdown: async () => {},
   };
 
@@ -50,7 +47,6 @@ function controllerFake(): { controller: AgentController; ctx: FakeContext } {
     skillLoader: { reload: () => [] },
     toolRegistry: {},
     providerFactory: { createWithFallback: () => ({ name: "f", generate: async () => ({}) }) },
-    eventEmitter: new EventEmitter(),
     config: {
       audio: { ttsVoiceId: "v", edgeTtsBinary: "edge-tts", ffmpegBinary: "ffmpeg" },
       filesystem: { tmpDir: "./tmp" },

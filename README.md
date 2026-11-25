@@ -49,11 +49,11 @@ Pergunta solta como *"que horas são?"* devolve `null` no passo zero e cai no ag
 | **Ferramentas de arquivo** | `criar_arquivo`, `ler_arquivo`, `listar_arquivos`, presas à `WORKSPACE_ROOT` |
 | **Histórico de grupos** | Opcional: coletor MTProto lê o passado e o ao vivo dos grupos escolhidos; `historico_grupo` consulta |
 | **Especialização de domínio** | Destila glossário, problemas recorrentes e quem-sabe-o-quê dos grupos para `conhecimento/`, com atribuição |
-| **Whitelist estrita** | Só IDs em `TELEGRAM_ALLOWED_USER_IDS` são atendidos |
+| **Whitelist estrita** | Só IDs em `TELEGRAM_ALLOWED_USER_IDS`, em chat privado, são atendidos |
 | **Degradação graciosa** | Sem `ffmpeg`/`whisper`/`edge-tts`, o bot sobe e desliga só a voz |
 | **Shutdown ordenado** | `SIGINT`/`SIGTERM`, ou `/parar` no chat, param polling e controller, com timeout de 10s |
 
-**Testes:** `npm test` roda 156 testes em 17 arquivos (`vitest`). Vários deles leem o *destino* em vez da origem — o corpo JSON que sai para a API do LLM, o texto que chega na API do Telegram, os arquivos no disco, o stderr de um boot real — porque uma peça que "roda" não é uma peça que entrega.
+**Testes:** `npm test` roda 174 testes em 17 arquivos (`vitest`). Vários deles leem o *destino* em vez da origem — o corpo JSON que sai para a API do LLM, o texto que chega na API do Telegram, os arquivos no disco, o stderr de um boot real — porque uma peça que "roda" não é uma peça que entrega.
 
 ---
 
@@ -129,7 +129,7 @@ Com os grupos sendo coletados, o agente destila o conteúdo em conhecimento dur�
 
 A destilação roda **sem bloquear o boot**: o bot já atende enquanto ela trabalha, e o conhecimento aparece minutos depois. Se o processo reiniciar no meio, a rodada seguinte continua.
 
-A skill [`conhecimento-grupos`](agents/skills/conhecimento-grupos/SKILL.md) é o que transforma isso em especialização: ela manda o agente ler o destilado antes de responder, usar `historico_grupo` para citar e datar, e **atribuir toda afirmação a quem disse e quando**. Isso não é formalidade — o conteúdo é conversa de terceiros, não verificada e datada. O agente relata o que foi dito; não afirma que é verdade.
+A skill [`conhecimento-grupos`](agents/skills/conhecimento-grupos/SKILL.md) é o que transforma isso em especialização: ela manda o agente ler o destilado antes de responder, usar `historico_grupo` para citar e datar, e **atribuir toda afirmação a quem disse e quando**. Isso não é formalidade — o conteúdo é conversa de terceiros, não verificada e datada. O agente relata o que foi dito; não afirma que é verdade. Por isso o destilado também volta ao contexto cercado por marcadores de dado não confiável, tanto na leitura por `ler_arquivo` quanto no prompt da rodada seguinte de destilação.
 
 Duas coisas ficam deliberadamente de fora do destilado: tese de mercado e recomendação operacional. São a parte mais ruidosa, que envelhece mais rápido e que um agente não deve repetir com voz de autoridade. Continuam no histórico cru, acessíveis com atribuição.
 

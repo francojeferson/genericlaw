@@ -91,16 +91,15 @@ O `TelegramOutputHandler` e o facade que o `AgentController` chama. Ele encapsul
 
 ```typescript
 /** O que de fato saiu para o usuario - nao o que foi pedido. */
-type Delivered = "text" | "voice" | "voice+text" | "error" | "blocked" | "none";
+type Delivered = "text" | "voice" | "voice+text" | "error" | "none";
 
 class TelegramOutputHandler {
   private strategies: Map<string, OutputStrategy>;
   private ctx: GrammyContext;
-  private eventEmitter: EventEmitter;
 
-  constructor(ctx: GrammyContext, config: OutputHandlerConfig, eventEmitter: EventEmitter);
+  constructor(ctx: GrammyContext, config: OutputHandlerConfig);
 
-  async send(conversationId: string, result: AgentLoopResult): Promise<Delivered>;
+  async send(result: AgentLoopResult): Promise<Delivered>;
   async sendError(text: string): Promise<void>;
 }
 ```
@@ -111,26 +110,16 @@ exatamente o que impediu, por tres rodadas de teste manual, confirmar se a voz f
 devolvido e gravado no `metadata` da mensagem pelo `AgentController` e logado como
 `[AgentController] delivered: <valor>`.
 
-**`none`** aparece quando o envio e pulado por shutdown em andamento; **`blocked`**, quando o
-usuario bloqueou o bot.
+**`none`** aparece quando o envio e pulado por shutdown em andamento, ou quando ele lanca erro (ver EC-03).
 
 Uma instancia do handler serve **uma** mensagem: ela encapsula o `Context` daquele update.
 
-**Contrato de eventos (EventEmitter):**
-
-O `TelegramOutputHandler` emite eventos para notificar o `AgentController` sobre condicoes assincronas detectadas durante o envio. O eventEmitter e injetado via constructor e compartilhado com o Controller.
-
-| Evento | Emitido por | Escutado por | Payload | Gatilho |
-|--------|------------|-------------|---------|---------|
-| `userBlocked` | TelegramOutputHandler.send() | AgentController | `{ conversationId: string }` | Erro 403 "Forbidden: bot was blocked by the user" ao chamar `ctx.reply()` |
-
-**`send(conversationId, result)`:**
+**`send(result)`:**
 1. Seleciona a estrategia baseada em `result.finishReason` e `result.requiresAudioReply`.
 2. Se `result.finishReason === "error"` -> `ErrorOutputStrategy`.
 3. Se `result.requiresAudioReply === true` e Edge-TTS disponivel -> `AudioOutputStrategy`.
 4. Caso contrario -> `TextOutputStrategy`.
-5. Delega `strategy.send(this.ctx, result)`.
-6. Se a estrategia lancar erro 403 "Forbidden", emite `this.eventEmitter.emit("userBlocked", { conversationId })`.
+5. Delega `strategy.send(this.ctx, result)`. Nao captura erro: uma falha de envio sobe para o chamador.
 
 **`sendError(text)`:** formata com prefixo `\u26a0\ufe0f` e envia via `ctx.reply()`. Recebe uma
 mensagem ja escrita para o usuario; nao recebe `Error` nem tenta extrair nada de um. Usado pelo
@@ -261,7 +250,7 @@ Nao gera tabela SQLite. E pass-through state. Memoria do SQLite captura a string
 |---------|---------|----------------------|
 | EC-01: Rate Limiting Telegram (429 Too Many Requests) | O Output gerou 30 chunks sequenciais por um arquivo colossal e o TG bloqueia Flood. Com CHUNK_SIZE=4000, respostas acima de ~120.000 caracteres produzem 30+ chunks, zona de risco para rate limiting. | Grammy lanca `ApiError` com codigo 429. O OutputHandler captura, extrai o valor do header `Retry-After` (ou usa fallback de 5s), dorme via `sleep(ms)`, e retenta o chunk atual. Grammy nao implementa retry automatico para 429 - a logica de espera e retry e responsabilidade do OutputHandler. Se 3 retries consecutivos falharem, os chunks restantes sao descartados e o usuario recebe: "\u26a0\ufe0f Mensagem parcial: limite de envios excedido. Tente reduzir o tamanho da resposta." |
 | EC-02: Path File Corrupted / Cannot Write TMP | Arquivo `.md` pedido para export mas pasta /tmp sem prems de IO Read. | Captura o err fs.Write, e retrocede mandando como texto em Chunk Alerting pro usario: "Nao consegui gerar arq, segue texto puro...". |
-| EC-03: Bot Blocker | O user bloqueia o bot ou desativa mid-reply. | O `ctx.reply` lanca erro "Forbidden". Output handler descarta em Catch e loga "Msg abandonada, User bot-blocked" para nao falhar stack Node. |
+| EC-03: Bot Blocker | O user bloqueia o bot ou desativa mid-reply. | O `ctx.reply` lanca erro 403 "Forbidden". O erro sobe do `send()` ate o `AgentController`, que o loga como erro de pipeline; o aviso ao usuario tambem falha e e ignorado. Nada marca a conversa como bloqueada: quando o usuario desbloqueia o bot, a proxima mensagem e atendida normalmente. |
 
 ---
 
@@ -281,4 +270,4 @@ Sera construido instanciando o `OutputHandler` diretamente na ponta passiva do C
 
 - Q1 (Resolvida): MarkdownV1 rejeitado para MVP. Embora V1 seja menos restritivo que V2, ainda exige escape de underscores e asteriscos em certos contextos, e LLMs nao sao confiaveis para produzir markup consistentemente escapado. Texto puro e a opcao mais segura e previsivel para o MVP. Suporte a HTML/MarkdownV1 como opt-in (flag de configuracao) pode ser considerado na versao 2.
 - Q2 (Resolvida): Grammy NAO implementa retry automatico para 429. A biblioteca lanca `ApiError` com o codigo HTTP e o cliente deve implementar a logica de retry. O comportamento descrito em EC-01 esta correto e e responsabilidade do OutputHandler.
-- Q3 (Resolvida): Quando o OutputHandler recebe erro 403 "Forbidden: bot was blocked by the user", ele emite um evento `userBlocked` que o AgentController escuta. O Controller entao chama `MemoryManager.markConversationBlocked(conversationId)` que seta um flag `blocked = 1` na tabela `conversations`. Na proxima mensagem deste usuario, o Controller verifica o flag e descarta o processamento antes de chegar ao AgentLoop, logando: `[AgentController] Skipping message from blocked user <userId>.` O flag pode ser limpo manualmente via SQLite se o usuario desbloquear o bot.
+- Q3 (Resolvida, revertida): o OutputHandler chegou a emitir um evento `userBlocked` ao receber 403 "Forbidden: bot was blocked by the user", e o Controller marcava `blocked = 1` na conversa e descartava as mensagens seguintes. Nada limpava o flag, entao um bloqueio seguido de desbloqueio trancava o dono para fora, em silencio. O recurso foi removido: o 403 e uma falha de envio comum (ver EC-03). A coluna `blocked` continua em `conversations`, sem uso, para nao criar dois formatos de schema.

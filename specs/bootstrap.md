@@ -64,7 +64,7 @@ Um `.env` com erro de digitacao falha em milissegundos, nao depois de um round-t
 7. **Inicializar ToolRegistry:** Registrar as tools de filesystem, todas presas a `WORKSPACE_ROOT`.
 8. **Inicializar SkillLoader:** Carregar skills de `SKILLS_DIR` e logar quantas. Nao ha watcher de arquivos: o `AgentController` chama `reload()` a cada mensagem, entao o diretorio ja e relido antes de cada turno (ver `skill-user.md` 8.1).
 9. **Inicializar SkillRouter e AgentLoop:** O router recebe a `ProviderFactory`; o loop recebe `maxIterations`, `toolTimeoutMs` e `logMessageContent`.
-10. **Construir AgentController:** Injetar todas as dependencias no construtor. **Nao ha `init()`** - o construtor so guarda as deps e registra o listener de `userBlocked`.
+10. **Construir AgentController:** Injetar todas as dependencias no construtor. **Nao ha `init()`** - o construtor so guarda as deps.
 11. **Conectar TelegramInputHandler ao Grammy:** Instanciar passando `voiceEnabled: ffmpegAvailable && whisperAvailable` - o resultado das checagens do passo 5 precisa chegar ao handler, caso contrario ele aceita audio que nao tem como processar - e `onShutdown`, um thunk que chama `shutdown()` (declarada adiante; so precisa existir na hora da chamada). `start()` registra os listeners e inicia o polling. Ver telegram-input.md secao 8.2.
 12. **Registrar handlers de shutdown:** `process.on("SIGTERM", shutdown)` e `process.on("SIGINT", shutdown)`.
 
@@ -113,10 +113,10 @@ desenvolvimento, `Ctrl+C`.
 | Cenario | Trigger | Comportamento esperado |
 |---------|---------|----------------------|
 | EC-01: `.env` ausente | Arquivo `.env` nao existe. | `dotenv` nao lanca erro. Mas validacao de variaveis obrigatorias falha -> log com lista de variaveis faltantes -> exit(1). |
-| EC-02: DB corrompido | `MemoryManager.initialize()` detecta schema invalido. | MemoryManager aplica estrategia "recriar se invalido" (renomeia .db para .bak, cria novo). Bootstrap loga warning e prossegue. |
+| EC-02: DB corrompido | `MemoryManager.initialize()` roda uma consulta de validade (`SELECT 1 FROM sqlite_master`) e ela falha: arquivo cortado ou que nao e um banco SQLite. | MemoryManager aplica estrategia "recriar se invalido" (copia o arquivo para `<dbPath>.bak`, cria um banco novo). Bootstrap loga warning e prossegue. O arquivo nunca e gravado por cima: ver `memory-manager.md` 8.5. |
 | EC-03: API key invalida | Provider retorna 401 na primeira chamada real. | O bootstrap **nao** testa autenticidade de chave - isso custaria uma chamada paga por provider. Ele verifica duas coisas baratas: que a variavel existe (`validateConfig`) e que cada nome configurado virou um provider construido (passo 2). Uma chave presente porem invalida so aparece na primeira mensagem. |
 | EC-06: Nome de provider sem chave nem preset | `LLM_PROVIDER=foo` sem `OPENROUTER_API_KEY`. | A factory pula `foo` com warning; o passo 2 detecta a ausencia em `getNames()` e encerra com exit 1 citando `foo`. Antes desta checagem o processo subia inteiro e so falhava por mensagem, sem nada no boot apontando a causa. |
-| EC-04: Grammy falha ao iniciar polling | Rede indisponivel ou token invalido. | `bot.start()` lanca excecao. Bootstrap captura, loga erro, e chama shutdown. |
+| EC-04: Grammy falha ao iniciar polling | Rede indisponivel ou token invalido. | `bot.start()` lanca excecao. Bootstrap captura, loga erro, e chama shutdown. Erro dentro de um handler nao chega aqui: o `bot.catch` do `TelegramInputHandler` o loga e o polling continua (ver `telegram-input.md` 8.2). |
 | EC-05: Duas instancias competindo pelo mesmo bot token | Outro processo ou maquina rodando o GeneriClaw com o mesmo `TELEGRAM_BOT_TOKEN`. | **Nao tratado.** O Telegram responde `409 Conflict: terminated by other getUpdates request` a um dos dois, e o polling do grammy fica reclamando em loop. Um arquivo de lock com PID em `./data/` resolveria para instancias na mesma maquina, mas nao para maquinas diferentes, que e o caso que realmente importa; nao foi implementado. Na pratica isso aparece em desenvolvimento, quando o `tsx watch` reinicia antes de o processo anterior soltar o polling, e se resolve sozinho. |
 
 ---

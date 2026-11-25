@@ -103,6 +103,12 @@ armazenamento de uploads - passam `overwrite: true` explicitamente.
 5. Se a leitura nao alcancou o fim do arquivo, apara o pedaco de volta a uma fronteira de caractere UTF-8 e anexa um marcador explicito: `[...leitura parcial: bytes X-Y de Z. Chame ler_arquivo novamente com offset=Y para continuar.]`
 6. Retorna `ToolResult { success: true, output: "<conteudo>" }`.
 
+**Cerca em `conhecimento/`.** O destilado de grupos (`<WORKSPACE_ROOT>/conhecimento/`) e texto de
+terceiros resumido por um modelo. Quando o caminho **resolvido** cai nessa pasta (`./conhecimento/x`
+e `a/../conhecimento/x` tambem contam), o pedaco lido sai embrulhado em `delimitarNaoConfiavel`, como
+a mensagem de grupo lida por `historico_grupo`. O marcador de leitura parcial do passo 5 fica **fora**
+da cerca, porque e nosso. Arquivos de outras pastas voltam sem cerca.
+
 **Por que o teto e a paginacao existem:** o resultado de uma tool permanece no contexto do loop em
 todas as iteracoes seguintes, entao uma leitura grande e paga repetidamente. Uma leitura unica de um
 documento de ~200KB levou o prompt de 1.4k para 121k tokens em tres iteracoes. O teto limita o custo

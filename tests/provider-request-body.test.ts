@@ -151,3 +151,25 @@ describe("corpo enviado por gemini", () => {
     expect(textos.some((t) => t.startsWith("Tool result:"))).toBe(true);
   });
 });
+
+// `retryCount || 3` transformava o 0 permitido (LLM_RETRY_COUNT=0, "nao tentar de novo") em 3.
+describe("retryCount do gemini", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    [0, 1],
+    [2, 3], // controle: com tentativas liberadas o 503 e repetido, entao a contagem le o destino certo
+  ])("retryCount %i faz %i chamada(s) quando o servico responde 503", async (retryCount, esperado) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let chamadas = 0;
+    vi.stubGlobal("fetch", async () => {
+      chamadas++;
+      return { ok: false, status: 503, statusText: "Service Unavailable" } as unknown as Response;
+    });
+
+    const gemini = new GeminiProvider({ apiKey: "k", retryCount, retryBaseDelayMs: 1 });
+    await expect(gemini.generate([{ role: "user", content: "oi" }])).rejects.toThrow("503");
+
+    expect(chamadas).toBe(esperado);
+  });
+});

@@ -23,8 +23,6 @@ export interface Message {
 export interface ConversationRepository {
   create(userId: string, id?: string): Conversation;
   findById(id: string): Conversation | null;
-  markBlocked(conversationId: string): void;
-  isBlocked(conversationId: string): boolean;
 }
 
 export interface MessageRepository {
@@ -67,22 +65,6 @@ export class SqliteConversationRepository implements ConversationRepository {
     }
     stmt.free();
     return null;
-  }
-
-  markBlocked(conversationId: string): void {
-    const now = new Date().toISOString();
-    this.db.run("UPDATE conversations SET blocked = 1, updated_at = ? WHERE id = ?", [now, conversationId]);
-  }
-
-  isBlocked(conversationId: string): boolean {
-    const stmt = this.db.prepare("SELECT blocked FROM conversations WHERE id = ?");
-    stmt.bind([conversationId]);
-    let blocked = false;
-    if (stmt.step()) {
-      blocked = (stmt.getAsObject() as { blocked: number }).blocked === 1;
-    }
-    stmt.free();
-    return blocked;
   }
 
   private mapRow(row: Record<string, unknown>): Conversation {

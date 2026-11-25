@@ -41,8 +41,8 @@ export class GeminiProvider implements ILlmProvider {
     this.apiKey = config.apiKey;
     this.model = config.model || "gemini-2.0-flash";
     this.timeoutMs = config.timeoutMs || 120000;
-    this.retryCount = config.retryCount || 3;
-    this.retryBaseDelayMs = config.retryBaseDelayMs || 1000;
+    this.retryCount = config.retryCount ?? 3;
+    this.retryBaseDelayMs = config.retryBaseDelayMs ?? 1000;
     this.baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`;
   }
 

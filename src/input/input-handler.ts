@@ -88,6 +88,18 @@ export class TelegramInputHandler {
   }
 
   async start(): Promise<void> {
+    // Sem isto o grammy relanca o erro de qualquer handler e para o polling, e o main.ts
+    // trata esse retorno como falha de boot: uma chamada do Telegram que falha derrubava o bot.
+    this.bot.catch((e) => console.error("[Telegram] handler failed:", e.error));
+
+    // Unico controle de acesso: o grammy so chega aos handlers abaixo quando next() e chamado.
+    // Fora de chat privado ou fora da lista, ignora calado: sem resposta e sem log.
+    this.bot.use(async (ctx, next) => {
+      if (ctx.chat?.type === "private" && ctx.from && this.allowedUserIds.includes(String(ctx.from.id))) {
+        await next();
+      }
+    });
+
     // registrado primeiro: o grammy encerra a cadeia aqui, entao /novo nunca chega em handleText
     this.bot.command(["novo", "reset"], (ctx) => this.handleReset(ctx));
     this.bot.command(["parar", "stop"], (ctx) => this.handleStop(ctx));
@@ -101,10 +113,6 @@ export class TelegramInputHandler {
 
   async stop(): Promise<void> {
     await this.bot.stop();
-  }
-
-  private isWhitelisted(userId: number): boolean {
-    return this.allowedUserIds.includes(String(userId));
   }
 
   private buildProcessedInput(
@@ -127,8 +135,6 @@ export class TelegramInputHandler {
   }
 
   private async handleStop(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId || !this.isWhitelisted(userId)) return;
     if (!this.onShutdown) {
       await ctx.reply("Encerramento nao esta disponivel nesta instancia.");
       return;
@@ -143,9 +149,6 @@ export class TelegramInputHandler {
   }
 
   private async handleReset(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId || !this.isWhitelisted(userId)) return;
-
     const removed = this.controller.resetConversation(String(ctx.chat!.id));
     await ctx.reply(
       `Conversa reiniciada: ${removed} mensagem(ns) apagada(s). ` +
@@ -154,13 +157,11 @@ export class TelegramInputHandler {
   }
 
   private async handleText(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId || !this.isWhitelisted(userId)) return;
-
     const text = ctx.message?.text || "";
     if (!text.trim()) return;
 
-    await ctx.replyWithChatAction("typing");
+    // best-effort: o "digitando" e so um aviso visual, e se ele falhar a mensagem segue
+    await ctx.replyWithChatAction("typing").catch(() => {});
 
     const requiresAudioReply = this.detectAudioKeyword(text);
     const input = this.buildProcessedInput(ctx, text, "text", requiresAudioReply);
@@ -168,8 +169,6 @@ export class TelegramInputHandler {
   }
 
   private async handleVoice(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId || !this.isWhitelisted(userId)) return;
     if (!this.voiceEnabled) {
       await ctx.reply("Voz desabilitada: dependências de áudio não encontradas.");
       return;
@@ -184,7 +183,7 @@ export class TelegramInputHandler {
     const fileId = (voice as { file_id: string }).file_id;
     if (!fileId) return;
 
-    await ctx.replyWithChatAction("typing");
+    await ctx.replyWithChatAction("typing").catch(() => {});
 
     let oggPath: string | null = null;
     let wavPath: string | null = null;
@@ -240,9 +239,6 @@ export class TelegramInputHandler {
   }
 
   private async handleDocument(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    if (!userId || !this.isWhitelisted(userId)) return;
-
     const doc = ctx.message?.document;
     if (!doc) return;
 
@@ -256,7 +252,7 @@ export class TelegramInputHandler {
       return;
     }
 
-    await ctx.replyWithChatAction("typing");
+    await ctx.replyWithChatAction("typing").catch(() => {});
 
     let downloadedPath: string | null = null;
 

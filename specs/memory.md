@@ -60,8 +60,6 @@ A adocao do SQLite e veloz, serverless (um arquivo fisico unico), suporta chamad
 interface ConversationRepository {
   create(userId: string, id?: string): Conversation;   // id = chat id do Telegram
   findById(id: string): Conversation | null;
-  markBlocked(conversationId: string): void;
-  isBlocked(conversationId: string): boolean;
 }
 ```
 

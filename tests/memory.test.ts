@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import { randomBytes } from "crypto";
 import { MemoryManager } from "../src/memory/memory-manager.js";
 
 const DIR = "./tmp/test-mem";
@@ -17,6 +18,7 @@ beforeEach(async () => {
 // O MemoryManager guarda o Database num campo estatico; shutdown() limpa ele,
 // entao sem isto cada teste reusaria o banco em memoria do teste anterior.
 afterEach(async () => {
+  vi.restoreAllMocks(); // antes do shutdown: ele grava em disco e nao pode pegar um fs falso
   await mm.shutdown();
   fs.rmSync(DIR, { recursive: true, force: true });
 });
@@ -91,15 +93,6 @@ describe("clearMessages", () => {
   });
 });
 
-describe("blocking", () => {
-  it("marks and reads the blocked flag", () => {
-    mm.createConversation("user-1", CHAT_ID);
-    expect(mm.isConversationBlocked(CHAT_ID)).toBe(false);
-    mm.markConversationBlocked(CHAT_ID);
-    expect(mm.isConversationBlocked(CHAT_ID)).toBe(true);
-  });
-});
-
 describe("schema migration", () => {
   it("persists schema changes to disk even with no message writes", async () => {
     // a guarda de flag suja pula escritas se nenhuma linha mudou, o que de outra
@@ -138,5 +131,57 @@ describe("persistence", () => {
     expect(reopened.getRecentMessages(CHAT_ID).map((m) => m.content)).toEqual(["persist me"]);
 
     mm = reopened; // let afterEach shut this one down
+  });
+
+  it("so troca o arquivo por rename: falha antes dele deixa o banco anterior intacto", async () => {
+    mm.createConversation("user-1", CHAT_ID);
+    await mm.shutdown();
+    const v1 = fs.readFileSync(DB);
+
+    mm = new MemoryManager({ dbPath: DB, windowSize: 5, dbMaxSizeMb: 500 });
+    await mm.initialize();
+    mm.saveMessage(CHAT_ID, "user", "so na memoria");
+
+    // o processo morrendo entre escrever o temporario e trocar o arquivo
+    vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("morreu aqui");
+    });
+    const erro = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mm.shutdown();
+
+    expect(erro).toHaveBeenCalledWith(expect.stringContaining("Failed to save database")); // controle: a gravacao rodou e falhou
+    expect(fs.readFileSync(DB).equals(v1)).toBe(true);
+
+    mm = new MemoryManager({ dbPath: DB, windowSize: 5, dbMaxSizeMb: 500 });
+    await mm.initialize(); // o banco anterior abre normalmente; afterEach desliga
+    expect(mm.getRecentMessages(CHAT_ID)).toEqual([]);
+  });
+});
+
+// O construtor do sql.js aceita qualquer buffer: arquivo cortado ou lixo so falham na primeira
+// consulta. A recuperacao precisa pegar os dois, guardar o arquivo ruim e subir um banco novo
+// em vez de derrubar o boot.
+describe("banco corrompido no disco", () => {
+  const estragos: [string, (bom: Buffer) => Buffer][] = [
+    ["arquivo cortado em 60%", (bom) => bom.subarray(0, Math.floor(bom.length * 0.6))],
+    ["bytes aleatorios", (bom) => randomBytes(bom.length)],
+  ];
+
+  it.each(estragos)("%s: guarda o arquivo em .bak e abre um banco novo e usavel", async (_nome, estragar) => {
+    mm.createConversation("user-1", CHAT_ID);
+    mm.saveMessage(CHAT_ID, "user", "antes");
+    await mm.shutdown(); // grava em disco e zera o singleton estatico
+    const ruim = estragar(fs.readFileSync(DB));
+    fs.writeFileSync(DB, ruim);
+    const aviso = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    mm = new MemoryManager({ dbPath: DB, windowSize: 5, dbMaxSizeMb: 500 });
+    await mm.initialize();
+
+    expect(aviso).toHaveBeenCalled();
+    expect(fs.readFileSync(`${DB}.bak`).equals(ruim)).toBe(true); // o que estava no disco foi guardado
+    expect(mm.getConversation(CHAT_ID)).toBeNull(); // banco novo: nada do antigo
+    mm.createConversation("user-1", CHAT_ID);
+    expect(() => mm.saveMessage(CHAT_ID, "user", "depois")).not.toThrow();
   });
 });

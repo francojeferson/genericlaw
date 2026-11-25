@@ -158,10 +158,12 @@ Suite atual (`npx vitest run`), organizada por comportamento e nao por classe:
 tests/
   agent-loop.test.ts            # deduplicacao de tool calls, soma de tokens,
                                 # teto e paginacao de ler_arquivo (ScriptedProvider local)
-  provider-request-body.test.ts # o corpo JSON que sai para cada provider: par tool_calls/tool
+  provider-request-body.test.ts # o corpo JSON que sai para cada provider: par tool_calls/tool;
+                                # retryCount 0 do gemini nao vira 3
   log-privacy.test.ts           # LOG_MESSAGE_CONTENT desligado nao deixa conteudo no log
   memory.test.ts                # id da conversa, ordenacao, truncamento, /novo,
-                                # persistencia de schema e de dados no shutdown
+                                # persistencia de schema e de dados no shutdown,
+                                # gravacao por rename, recuperacao de banco corrompido
   memory-window.test.ts         # janela, limite zero, minimos de config, tamanho do banco
   config.test.ts                # chaves ausentes/invalidas, defaults, regras de provider
   bootstrap-providers.test.ts   # boot real: provider inutilizavel mata o processo; diretorios
@@ -169,7 +171,8 @@ tests/
   skill-loader.test.ts          # frontmatter, defaults, regras de skip, dedupe, reload
   workspace-path.test.ts        # contencao de path, overwrite, validateArgs
   upload-path.test.ts           # nome seguro de upload, contencao contra file_name hostil
-  upload-collision.test.ts      # dois envios de mesmo nome, corrida no diretorio temporario
+  upload-collision.test.ts      # dois envios de mesmo nome, corrida no diretorio temporario,
+                                # gate de acesso (so o dono em chat privado) e bot.catch
   audio-request.test.ts         # deteccao de pedido de audio no texto
   audio-output.test.ts          # fallback de TTS, chunking, InputFile, valor de Delivered
 ```
@@ -232,14 +235,11 @@ class MockLlmProvider implements ILlmProvider {
 class MockMemoryManager {
   private conversations: Map<string, Conversation>;
   private messages: Map<string, Message[]>;
-  private blockedConversations: Set<string>;
 
   async initialize(): Promise<void>;
   createConversation(userId: string, provider?: string): Conversation;
   getRecentMessages(conversationId: string): Message[];
   saveResponse(conversationId: string, result: AgentLoopResult): void;
-  isConversationBlocked(conversationId: string): boolean;
-  markConversationBlocked(conversationId: string): void;
 }
 ```
 

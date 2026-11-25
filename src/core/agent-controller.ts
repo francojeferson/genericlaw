@@ -8,7 +8,6 @@ import type { Delivered } from "../output/output-handler.js";
 import { ProviderFactory } from "../providers/provider-factory.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ILlmProvider, LlmMessage } from "../providers/types.js";
-import { EventEmitter } from "events";
 import type { Context } from "grammy";
 import type { AppConfig } from "../config.js";
 
@@ -22,7 +21,6 @@ export interface AgentControllerDeps {
   skillLoader: SkillLoader;
   toolRegistry: ToolRegistry;
   providerFactory: ProviderFactory;
-  eventEmitter: EventEmitter;
   config: AppConfig;
 }
 
@@ -34,7 +32,6 @@ export class AgentController {
   private toolRegistry: ToolRegistry;
   private providerFactory: ProviderFactory;
   private isShuttingDown = false;
-  private eventEmitter: EventEmitter;
   private config: AppConfig;
 
   private processingQueue: Map<string, Promise<void>> = new Map();
@@ -47,12 +44,7 @@ export class AgentController {
     this.skillLoader = deps.skillLoader;
     this.toolRegistry = deps.toolRegistry;
     this.providerFactory = deps.providerFactory;
-    this.eventEmitter = deps.eventEmitter;
     this.config = deps.config;
-
-    this.eventEmitter.on("userBlocked", ({ conversationId }: { conversationId: string }) => {
-      this.memoryManager.markConversationBlocked(conversationId);
-    });
   }
 
   async handle(input: ProcessedInput, ctx: Context): Promise<void> {
@@ -120,16 +112,10 @@ export class AgentController {
         tmpDir: this.config.filesystem.tmpDir,
         edgeTtsBinary: this.config.audio.edgeTtsBinary,
         ffmpegBinary: this.config.audio.ffmpegBinary,
-      },
-      this.eventEmitter
+      }
     );
 
     try {
-      if (this.memoryManager.isConversationBlocked(conversationId)) {
-        console.info(`[AgentController] Skipping message from blocked user ${userId}.`);
-        return;
-      }
-
       let conversation = this.memoryManager.getConversation(conversationId);
       if (!conversation) {
         conversation = this.memoryManager.createConversation(userId, conversationId);
@@ -191,7 +177,7 @@ export class AgentController {
       let delivered: Delivered = "none";
       try {
         if (!this.isShuttingDown) {
-          delivered = await outputHandler.send(conversationId, result);
+          delivered = await outputHandler.send(result);
         }
       } finally {
         this.memoryManager.saveResponse(conversationId, result, delivered);

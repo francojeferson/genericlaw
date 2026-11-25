@@ -16,7 +16,8 @@ export class SkillRouter {
       const names = this.providerFactory.getNames();
       if (names.length === 0) return null;
       provider = this.providerFactory.createWithFallback(names);
-    } catch {
+    } catch (err) {
+      console.warn(`[SkillRouter] No provider for routing; continuing without a skill: ${err}`);
       return null;
     }
 
@@ -49,6 +50,8 @@ Rules:
         const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
         parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { name: null };
       } catch {
+        // sem o erro no log: a mensagem do JSON.parse cita um trecho da resposta do modelo
+        console.warn("[SkillRouter] Router reply is not valid JSON; continuing without a skill.");
         return null;
       }
 
@@ -61,7 +64,8 @@ Rules:
       }
 
       return null;
-    } catch {
+    } catch (err) {
+      console.warn(`[SkillRouter] Routing call failed; continuing without a skill: ${err}`);
       return null;
     }
   }

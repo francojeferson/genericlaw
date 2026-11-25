@@ -15,7 +15,7 @@ Este documento e a fonte unica de verdade para todas as variaveis de ambiente do
 | Variavel | Tipo | Obrigatoria | Padrao | Modulo Consumidor | Descricao |
 |----------|------|-------------|--------|-------------------|-----------|
 | `TELEGRAM_BOT_TOKEN` | string | Sim | - | Bootstrap, Grammy Bot | Token do bot Telegram obtido via @BotFather. |
-| `TELEGRAM_ALLOWED_USER_IDS` | string (CSV) | Sim | - | TelegramInputHandler | Lista de user IDs separados por virgula. Ex: `123456789,987654321`. Usuarios fora desta lista sao ignorados silenciosamente. |
+| `TELEGRAM_ALLOWED_USER_IDS` | string (CSV) | Sim | - | TelegramInputHandler | Lista de user IDs separados por virgula. Ex: `123456789,987654321`. Usuarios fora desta lista, e qualquer chat que nao seja privado, sao ignorados silenciosamente. |
 
 ### 2.2 LLM Providers
 

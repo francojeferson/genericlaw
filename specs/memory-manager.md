@@ -11,7 +11,7 @@ O `MemoryManager` e o facade central da camada de persistencia do GeneriClaw. El
 ## 2. Contexto e Motivacao
 
 **Problema:**
-architecture.md posiciona `MemoryManager` como Facade na camada de persistencia. agent-controller.md e bootstrap.md referenciam metodos como `initialize()`, `getRecentMessages()`, `saveResponse()`, `createConversation()`, `markConversationBlocked()`, `isConversationBlocked()`. Mas nenhum spec define o contrato completo da classe. Sem ele, cada modulo acopla diretamente aos repositorios, quebrando o padrao Facade.
+architecture.md posiciona `MemoryManager` como Facade na camada de persistencia. agent-controller.md e bootstrap.md referenciam metodos como `initialize()`, `getRecentMessages()`, `saveResponse()`, `createConversation()`. Mas nenhum spec define o contrato completo da classe. Sem ele, cada modulo acopla diretamente aos repositorios, quebrando o padrao Facade.
 
 **Evidencias:**
 O padrao Facade e listado em architecture.md secao 7 como um dos design patterns utilizados. Os repositorios (`ConversationRepository`, `MessageRepository`) sao detalhados em memory.md secao 5, mas o facade que os agrupa nao tem contrato documentado.
@@ -65,8 +65,6 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 | RF-03 | `getRecentMessages(conversationId)` deve retornar as ultimas `MEMORY_WINDOW_SIZE` mensagens da conversa. | Must | Retorna array com no maximo `MEMORY_WINDOW_SIZE` mensagens, ordenadas por `id` ascendente (ordem de insercao). |
 | RF-04 | `saveMessage(conversationId, role, content, metadata?)` deve persistir mensagem e disparar truncamento se necessario. | Must | Mensagem aparece em `getRecentMessages()`. Se `COUNT > MEMORY_WINDOW_SIZE * 4`, mensagens antigas sao truncadas. |
 | RF-05 | `saveResponse(conversationId, result, delivered?)` deve persistir a resposta final do AgentLoop. | Must | Resposta aparece no historico. Conteudo acima de 64KB e truncado antes da insercao. O `metadata` grava `usage`, `finishReason`, `toolCallsMade`, `iterationsUsed` e `delivered`. |
-| RF-06 | `markConversationBlocked(conversationId)` deve setar `blocked = 1` na conversa. | Must | `isConversationBlocked()` retorna `true` apos chamada. |
-| RF-07 | `isConversationBlocked(conversationId)` deve retornar `true` se a conversa esta bloqueada. | Must | Usado pelo AgentController para descartar mensagens de usuarios bloqueados. |
 | RF-08 | `shutdown()` deve fechar a conexao SQLite graciosamente. | Must | Chamado durante `AgentController.shutdown()`. Nao corrompe o banco. |
 | RF-09 | `truncateOldMessages(conversationId)` deve manter apenas `MEMORY_WINDOW_SIZE` mensagens mais recentes. | Must | Chamado automaticamente apos cada insercao se `COUNT > MEMORY_WINDOW_SIZE * 4`. |
 | RF-10 | `getRecentMessages()` com `windowSize <= 0` deve devolver vazio, nunca a conversa inteira. | Must | `findByConversationId(id, 0)` retorna `[]`. O ramo "sem LIMIT" e reservado a chamadas sem o argumento. |
@@ -77,6 +75,11 @@ tiveram chamador. Foram apagados junto com `findByUserId()`, `updateTitle()`, os
 cada mensagem salva, sem nenhuma consulta que o usasse. As colunas `title` e `provider` continuam no
 `CREATE TABLE` de proposito: `CREATE TABLE IF NOT EXISTS` nao altera bancos ja existentes, entao
 remove-las criaria dois formatos de schema em circulacao sem ganho algum.
+
+`markConversationBlocked()` e `isConversationBlocked()` (antigos RF-06 e RF-07) tambem foram
+removidos, junto com `markBlocked()`/`isBlocked()` nos repositorios: nada limpava o flag, entao um
+bloqueio seguido de desbloqueio do bot trancava o dono para fora, em silencio. A coluna `blocked`
+fica no `CREATE TABLE` e em `Conversation.blocked`, sem uso, pelo mesmo motivo de `title` e `provider`.
 
 ### 6.2 Fluxo Principal (Happy Path)
 
@@ -91,13 +94,7 @@ remove-las criaria dois formatos de schema em circulacao sem ganho algum.
 
 ### 6.3 Fluxos Alternativos
 
-**Fluxo Alternativo A - Usuario bloqueado:**
-1. OutputHandler detecta erro 403 "Forbidden" ao enviar resposta.
-2. OutputHandler emite evento `userBlocked`.
-3. AgentController captura e chama `MemoryManager.markConversationBlocked(conversationId)`.
-4. Proxima mensagem do usuario: AgentController chama `isConversationBlocked(conversationId)` -> `true`. Processamento descartado.
-
-**Fluxo Alternativo B - Truncamento de mensagem longa:**
+**Fluxo Alternativo A - Truncamento de mensagem longa:**
 1. `saveResponse` recebe conteudo de 80KB.
 2. `MemoryManager` trunca para 65536 bytes (UTF-8).
 3. Loga warning: `[MemoryManager] Message content truncated from 81920 to 65536 bytes.`
@@ -173,10 +170,6 @@ class MemoryManager {
   getRecentMessages(conversationId: string): Message[];
   clearMessages(conversationId: string): number;   // /novo - apaga historico, mantem a conversa
 
-  // Bloqueio de usuario
-  markConversationBlocked(conversationId: string): void;
-  isConversationBlocked(conversationId: string): boolean;
-
   // Manutencao
   truncateOldMessages(conversationId: string): number;
 }
@@ -223,8 +216,14 @@ class MemoryManager {
 **Sem `journal_mode=WAL`.** O backend e wasm em memoria; WAL nao faz nada aqui. Persistencia e
 reescrita do arquivo inteiro (8.5).
 
-**Banco corrompido:** se `new SQL.Database(buffer)` lanca, o arquivo e copiado para `<dbPath>.bak`
-e um banco vazio e criado. O boot prossegue com warning em vez de abortar.
+**Banco corrompido:** o construtor `new SQL.Database(buffer)` aceita qualquer buffer, entao arquivo
+cortado ou lixo so falham na primeira consulta. `initialize()` roda `SELECT 1 FROM sqlite_master`
+dentro do mesmo `try`: se ela ou o construtor lancam, o arquivo e copiado para `<dbPath>.bak` e um
+banco vazio e criado. O boot prossegue com warning em vez de abortar. Antes, a primeira consulta
+rodava fora do `try` (nos PRAGMAs), e o boot morria sem recuperacao.
+
+`shortcut:` a consulta pega arquivo cortado e arquivo que nao e SQLite, nao um byte alterado no meio
+de uma pagina de dados (isso exigiria `PRAGMA quick_check`, que le o banco inteiro a cada boot).
 
 **Contrato:**
 - `dbInstance` e estatica e privada. Apenas `MemoryManager` gerencia seu ciclo de vida.
@@ -242,8 +241,14 @@ exportar o banco inteiro e reescrever o arquivo - nao ha escrita incremental.
 mudou. Sem isso, um banco de ate `DB_MAX_SIZE_MB` (padrao 500) seria serializado e reescrito a cada
 5 segundos mesmo com o bot ocioso.
 
-Marcam o banco como sujo: `saveMessage()`, `createConversation()`, `markConversationBlocked()`,
-`clearMessages()`, `checkDbSize()` quando compacta, e **`runMigrations()`**.
+Marcam o banco como sujo: `saveMessage()`, `createConversation()`, `clearMessages()`,
+`checkDbSize()` quando compacta, e **`runMigrations()`**.
+
+**Gravacao atomica.** `saveToDisk()` grava `<dbPath>.tmp` e troca o arquivo com `fs.renameSync`.
+Gravar direto em `dbPath` deixava um banco cortado se o processo morresse no meio da escrita, e a
+recuperacao de banco corrompido (8.4) so existe no boot seguinte. Se a gravacao ou o rename falham,
+o erro e logado, `dirty` continua ligado e o proximo autosave tenta de novo; o arquivo anterior fica
+intacto. No Windows o rename falha se outro processo mantem o `dbPath` aberto.
 
 **Migracoes contam como escrita.** Se `runMigrations()` nao marcar sujeira, o novo schema existe
 apenas em memoria: o arquivo mantem o schema antigo, a migracao reexecuta a cada boot, e so e

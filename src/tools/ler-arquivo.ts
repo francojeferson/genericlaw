@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
-import { BaseTool, resolveInWorkspace, truncateUtf8 } from "./registry.js";
+import { BaseTool, resolveInWorkspace, truncateUtf8, isInsideWorkspace, delimitarNaoConfiavel } from "./registry.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
+import { DIR_CONHECIMENTO, FONTE_DESTILADO } from "../knowledge/distiller.js";
 
 // O resultado de uma tool fica no contexto do loop em todas as iteracoes seguintes, entao
 // uma leitura grande e paga varias vezes. O teto NAO e sobrescrevivel: um modelo pediu
@@ -55,6 +56,11 @@ export class LerArquivoTool extends BaseTool {
       return { success: false, output: `Erro: '${inputPath}' é um diretório, não um arquivo.`, error: "is directory" };
     }
 
+    // O destilado de conhecimento/ e texto de terceiros: volta ao agente como dado cercado, igual
+    // a mensagem de grupo lida direto. Pelo caminho resolvido, entao "./conhecimento/x" tambem cai aqui.
+    const destilado = isInsideWorkspace(path.resolve(process.cwd(), this.workspaceRoot, DIR_CONHECIMENTO), resolved);
+    const cercar = (texto: string) => (destilado ? delimitarNaoConfiavel(texto, FONTE_DESTILADO) : texto);
+
     try {
       const fullContent = fs.readFileSync(resolved, "utf-8");
       const buf = Buffer.from(fullContent, "utf-8");
@@ -75,14 +81,14 @@ export class LerArquivoTool extends BaseTool {
         chunk = chunk.replace(/�+$/, "");
         const nextOffset = offset + Buffer.byteLength(chunk, "utf-8");
         console.warn(`[LerArquivoTool] Leitura parcial: bytes ${offset}-${nextOffset} de ${buf.length}.`);
-        // o modelo precisa saber que nao viu o arquivo inteiro
+        // o modelo precisa saber que nao viu o arquivo inteiro; o aviso e nosso, entao fica fora da cerca
         return {
           success: true,
-          output: `${chunk}\n\n[...leitura parcial: bytes ${offset}-${nextOffset} de ${buf.length}. Chame ler_arquivo novamente com offset=${nextOffset} para continuar.]`,
+          output: `${cercar(chunk)}\n\n[...leitura parcial: bytes ${offset}-${nextOffset} de ${buf.length}. Chame ler_arquivo novamente com offset=${nextOffset} para continuar.]`,
         };
       }
 
-      return { success: true, output: chunk };
+      return { success: true, output: cercar(chunk) };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, output: "Erro: arquivo não é texto UTF-8 válido.", error: msg };

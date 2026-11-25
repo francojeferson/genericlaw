@@ -2,7 +2,6 @@ import dotenv from "dotenv";
 import fs from "fs";
 import { Bot } from "grammy";
 import { execFile } from "child_process";
-import { EventEmitter } from "events";
 import { validateConfig, ConfigError } from "./config.js";
 import type { AppConfig } from "./config.js";
 import { MemoryManager } from "./memory/memory-manager.js";
@@ -151,8 +150,6 @@ async function main(): Promise<void> {
   });
   console.info("[Bootstrap] AgentLoop ready.");
 
-  const eventEmitter = new EventEmitter();
-
   const controller = new AgentController({
     memoryManager,
     agentLoop,
@@ -160,7 +157,6 @@ async function main(): Promise<void> {
     skillLoader,
     toolRegistry,
     providerFactory,
-    eventEmitter,
     config,
   });
   console.info("[Bootstrap] AgentController ready.");

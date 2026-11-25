@@ -20,6 +20,14 @@ const CHUNK = 120;
 
 export const DIR_CONHECIMENTO = "conhecimento";
 
+/**
+ * Como o destilado se descreve dentro da cerca de dado nao confiavel. Ele e texto de terceiros
+ * resumido por um modelo, e entra no contexto de novo por dois caminhos: o prompt da proxima
+ * destilacao e a leitura de conhecimento/ pelo agente.
+ */
+export const FONTE_DESTILADO =
+  "o conhecimento destilado de conversas de grupo do Telegram, resumido por um modelo a partir de mensagens de terceiros";
+
 /** Nome de arquivo estavel a partir do titulo do grupo. Exportada para teste. */
 export function slugify(titulo: string): string {
   const base = titulo
@@ -116,7 +124,7 @@ function promptInicial(titulo: string, transcricao: string): string {
 function promptAtualizacao(titulo: string, documento: string, transcricao: string): string {
   return (
     `Grupo: "${titulo}"\n\n` +
-    `Este e o conhecimento ja destilado deste grupo:\n\n${documento}\n\n` +
+    `Este e o conhecimento ja destilado deste grupo:\n\n${delimitarNaoConfiavel(documento, FONTE_DESTILADO)}\n\n` +
     `---\n\nChegaram mensagens novas:\n\n${delimitarNaoConfiavel(transcricao, FONTE)}\n\n---\n\n` +
     `Devolva o documento COMPLETO e atualizado, integrando o que ha de novo.\n` +
     `Funda entradas que viraram duplicata, corrija o que a conversa nova desmentiu e\n` +

@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { EventEmitter } from "events";
 import type { Context } from "grammy";
 import { TelegramOutputHandler } from "../src/output/output-handler.js";
 import type { AgentLoopResult } from "../src/memory/memory-manager.js";
@@ -19,11 +18,7 @@ class FakeContext {
 }
 
 function handlerFor(ctx: FakeContext): TelegramOutputHandler {
-  return new TelegramOutputHandler(
-    ctx as unknown as Context,
-    { ttsVoiceId: "v", tmpDir: "./tmp" },
-    new EventEmitter()
-  );
+  return new TelegramOutputHandler(ctx as unknown as Context, { ttsVoiceId: "v", tmpDir: "./tmp" });
 }
 
 const erro = (over: Partial<AgentLoopResult> = {}): AgentLoopResult => ({
@@ -40,7 +35,7 @@ const erro = (over: Partial<AgentLoopResult> = {}): AgentLoopResult => ({
 describe("resposta de erro entregue ao usuario", () => {
   it("entrega a mensagem escrita para o usuario, nao o erro cru da API", async () => {
     const ctx = new FakeContext();
-    await handlerFor(ctx).send("1", erro());
+    await handlerFor(ctx).send(erro());
 
     const entregue = ctx.replies.join("\n");
     expect(entregue).toContain(MARCADOR_A);
@@ -49,7 +44,7 @@ describe("resposta de erro entregue ao usuario", () => {
 
   it("cai no detalhe tecnico quando nao ha mensagem escrita (controle da busca)", async () => {
     const ctx = new FakeContext();
-    await handlerFor(ctx).send("1", erro({ finalResponse: "   " }));
+    await handlerFor(ctx).send(erro({ finalResponse: "   " }));
 
     // sem texto amigavel, algo precisa chegar: o Telegram recusa mensagem vazia
     expect(ctx.replies.join("\n")).toContain(MARCADOR_B);

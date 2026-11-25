@@ -74,9 +74,9 @@ A lib Grammy suporta streaming de arquivos anexos por `getFile()`. O Nodejs lida
 ### 6.2 Fluxo Principal (Happy Path)
 
 1. Entrada: "Cria um PRD pro meu novo app de financas e me responde em audio" enviado por Voice Note no Telegram Client pelo usuario.
-2. Bot Grammy valida se user ID = `TELEGRAM_ALLOWED_USER_IDS`.
+2. O gate de acesso do Grammy (`bot.use`) valida que o chat e privado e que o user ID esta em `TELEGRAM_ALLOWED_USER_IDS`.
 3. Evento classificado como Voz via `on(["message:voice", "message:audio"])`.
-4. Bot Controller atualiza status para o usuario do Telegram: `sendChatAction('record_voice')` ou `typing`.
+4. Bot Controller atualiza status para o usuario do Telegram: `sendChatAction('record_voice')` ou `typing`. Best-effort: se a chamada falhar, o fluxo segue.
 5. API de stream do TG contata URL temporaria interna para baixar chunks raw do audio (`.ogg`, `.mp3`) no `/tmp/`.
 6. Arquivo salvo e encaminhado para o modulo de audio usando o modelo Whisper local (subprocesso/lib).
 7. O sistema devolve o texto transcrito em PT-BR (ou detectado automaticamente pelo Whisper) com uma metatag interna marcando o trigger de TTS de volta, e o sistema exclui o physical temp file na conclusao do hook.
@@ -156,15 +156,27 @@ class TelegramInputHandler {
 }
 ```
 
-**Contrato de `start()`:** Registra, **nesta ordem**, o comando `/novo` (alias `/reset`) e depois os
-listeners para `message:text`, `message:voice`, `message:audio` e `message:document`. A ordem
-importa: o grammy encerra a cadeia no primeiro handler que nao chama `next()`, entao registrar o
-comando primeiro impede que `/novo` seja tratado como texto comum e enviado ao LLM. Cada listener
-valida `ctx.from.id` contra `allowedUserIds`, extrai conteudo, monta `ProcessedInput` e chama
+**Contrato de `start()`:** Registra, **nesta ordem**, `bot.catch`, o gate de acesso (`bot.use`), os
+comandos `/novo` (alias `/reset`) e `/parar` (alias `/stop`) e os listeners para `message:text`,
+`message:voice`, `message:audio` e `message:document`. A ordem importa: o grammy encerra a cadeia no
+primeiro handler que nao chama `next()`, entao registrar o comando primeiro impede que `/novo` seja
+tratado como texto comum e enviado ao LLM, e o gate registrado antes de tudo e o que impede qualquer
+handler de rodar para quem nao deve. Cada listener extrai conteudo, monta `ProcessedInput` e chama
 `controller.handle(processedInput)`.
 
-**Contrato de `/parar` (alias `/stop`):** valida o whitelist e dispara a mesma sequencia de
-encerramento dos sinais SIGINT/SIGTERM, via o callback `onShutdown` recebido do bootstrap.
+**Gate de acesso.** Um unico `bot.use` chama `next()` somente quando `ctx.chat.type === "private"` e
+`ctx.from.id` esta em `allowedUserIds`. Qualquer outro update (id fora da lista, grupo, update sem
+remetente) e ignorado em silencio: sem resposta e sem log. Os handlers nao repetem a checagem. Antes
+eram cinco copias coladas, uma por handler, sem teste, e nenhuma exigia chat privado.
+
+**`bot.catch`.** Sem handler de erro, o grammy relanca a excecao do primeiro handler que falhar e
+para o polling; `start()` retorna e o `main.ts` encerra o processo (ver `bootstrap.md` EC-04). O
+`bot.catch` loga `[Telegram] handler failed:` com o erro e o polling continua. Pelo mesmo motivo, o
+`replyWithChatAction("typing")` dos tres handlers e best-effort (`.catch(() => {})`): um 429 no
+"digitando" nao cancela a mensagem do usuario.
+
+**Contrato de `/parar` (alias `/stop`):** dispara a mesma sequencia de encerramento dos sinais
+SIGINT/SIGTERM, via o callback `onShutdown` recebido do bootstrap.
 
 O encerramento e **agendado para depois** do handler retornar (`setTimeout`), nao aguardado dentro
 dele: `shutdown()` chama `bot.stop()`, que espera os handlers em andamento terminarem. Chamar de
@@ -176,7 +188,7 @@ Windows nao ha forma confiavel de entregar SIGINT a um processo Node sem console
 Sem `/parar`, todo encerramento vira kill forcado: a gravacao final do banco nao roda e arquivos
 temporarios de TTS vazam em `tmp/`.
 
-**Contrato de `/novo`:** valida o whitelist, chama `controller.resetConversation(conversationId)` e
+**Contrato de `/novo`:** chama `controller.resetConversation(conversationId)` e
 responde com a contagem de mensagens apagadas. Apaga **somente** o historico: a linha da conversa
 permanece (remove-la quebraria a foreign key da proxima mensagem) e os arquivos ja criados no
 workspace nao sao tocados - a resposta diz isso explicitamente, porque "reiniciar" pode ser lido
@@ -288,7 +300,7 @@ Entregue: texto, voz (whisper local), documentos `.md`/`.pdf`, whitelist por id,
 `/novo` e `/parar`, e o armazenamento de upload com ponteiro. Coberto por
 `tests/audio-request.test.ts`, `tests/upload-path.test.ts` e `tests/upload-collision.test.ts` - este
 ultimo dispara o handler real registrado por `start()`, com `bot` e `fetch` falsos, e verifica os
-arquivos no disco.
+arquivos no disco, o gate de acesso (cada handler, passando pelo gate) e o `bot.catch`.
 
 Em aberto: nenhum item de rollout. OCR de PDF escaneado segue fora do escopo (NG-01).
 

@@ -170,7 +170,6 @@ Para manter a alta coesao e baixo acoplamento, os seguintes padroes sao aplicado
 4.  **Singleton:** Garantir instancia unica da conexao com o banco de dados.
 5.  **Strategy:** No `TelegramOutputHandler` para decidir entre enviar texto puro, chunks ou arquivos.
 6.  **Registry:** No sistema de Skills e Tools para registro dinamico de capacidades.
-7.  **Observer (EventEmitter):** No fluxo `userBlocked` entre `TelegramOutputHandler` e `AgentController`. O OutputHandler emite o evento quando detecta erro 403 "Forbidden" (usuario bloqueou o bot), e o AgentController escuta para chamar `MemoryManager.markConversationBlocked()`. Ver telegram-output.md EC-03 e agent-controller.md 6.2 step 14.
 
 ---
 

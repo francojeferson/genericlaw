@@ -67,6 +67,9 @@ export class MemoryManager {
         try {
           const buffer = fs.readFileSync(this.dbPath);
           this.db = new SQL.Database(buffer);
+          // o construtor aceita qualquer buffer: arquivo cortado ou lixo so falha na primeira
+          // consulta, que antes rodava fora deste try e derrubava o boot sem recuperacao
+          this.db.exec("SELECT 1 FROM sqlite_master");
         } catch {
           console.warn(`[MemoryManager] Database file corrupted, creating new one. Backing up old file.`);
           const bakPath = this.dbPath + ".bak";
@@ -106,7 +109,11 @@ export class MemoryManager {
     try {
       const data = this.db.export();
       const buffer = Buffer.from(data);
-      fs.writeFileSync(this.dbPath, buffer);
+      // temporario + rename: gravar por cima do arquivo deixava o banco cortado se o
+      // processo morresse no meio da escrita, e o rename troca o arquivo de uma vez
+      const tmpPath = this.dbPath + ".tmp";
+      fs.writeFileSync(tmpPath, buffer);
+      fs.renameSync(tmpPath, this.dbPath);
       this.dirty = false;
       // o arquivo acabou de ser escrito, entao o tamanho em disco e o real.
       // Antes isso so era checado no boot e o limite nunca valia durante o uso.
@@ -350,17 +357,6 @@ export class MemoryManager {
   getRecentMessages(conversationId: string): Message[] {
     this.ensureInitialized();
     return this.messageRepo.findByConversationId(conversationId, this.windowSize);
-  }
-
-  markConversationBlocked(conversationId: string): void {
-    this.dirty = true;
-    this.ensureInitialized();
-    this.conversationRepo.markBlocked(conversationId);
-  }
-
-  isConversationBlocked(conversationId: string): boolean {
-    this.ensureInitialized();
-    return this.conversationRepo.isBlocked(conversationId);
   }
 
   /** Apaga o historico de mensagens mas mantem a linha da conversa e seus arquivos. */
